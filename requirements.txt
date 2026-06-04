@@ -1,4 +1,4 @@
 streamlit>=1.35.0
 pandas>=2.0.0
-monarchmoney>=0.1.15
+monarchmoney-grablair>=0.1.18
 plotly>=5.0.0
