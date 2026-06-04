@@ -67,6 +67,11 @@ st.divider()
 # Authentication
 # ---------------------------------------------------------------------------
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    msg = str(exc)
+    return "429" in msg or "Too Many Requests" in msg or "rate limit" in msg.lower()
+
+
 def _try_secrets_login() -> bool:
     """Attempt auto-login from Streamlit secrets. Returns True on success."""
     try:
@@ -103,14 +108,21 @@ if st.session_state.client is None:
             if not email_in or not pw_in:
                 st.error("Email and password are required.")
             else:
-                with st.spinner("Connecting to Monarch Money…"):
+                with st.spinner("Connecting to Monarch Money… (retrying automatically if rate-limited)"):
                     try:
                         c = MonarchClient()
                         c.login(email_in, pw_in, mfa_in.strip() or None)
                         st.session_state.client = c
                         st.rerun()
                     except Exception as exc:
-                        st.error(f"Login failed: {exc}")
+                        if _is_rate_limit_error(exc):
+                            st.error(
+                                "**Monarch Money is rate-limiting login attempts (HTTP 429).** "
+                                "This usually clears up after a few minutes. "
+                                "Please wait 2–5 minutes and try again."
+                            )
+                        else:
+                            st.error(f"Login failed: {exc}")
 
         with st.expander("ℹ️  Where do I find my MFA secret?", expanded=False):
             st.markdown("""
