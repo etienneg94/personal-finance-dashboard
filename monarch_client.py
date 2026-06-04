@@ -1,6 +1,7 @@
 """Monarch Money synchronous client — wraps the async monarchmoney library."""
 
 import asyncio
+import time
 from typing import Optional
 
 
@@ -12,6 +13,11 @@ def _run(coro):
         loop.close()
 
 
+def _is_rate_limit(exc: Exception) -> bool:
+    msg = str(exc)
+    return "429" in msg or "Too Many Requests" in msg or "rate limit" in msg.lower()
+
+
 class MonarchClient:
     """Thin synchronous wrapper around the async monarchmoney library."""
 
@@ -20,15 +26,27 @@ class MonarchClient:
 
     def login(self, email: str, password: str, mfa_secret: Optional[str] = None) -> None:
         from monarchmoney import MonarchMoney
-        mm = MonarchMoney()
-        _run(mm.login(
-            email,
-            password,
-            mfa_secret_key=mfa_secret or None,
-            save_session=False,
-            use_saved_session=False,
-        ))
-        self._mm = mm
+        delays = [5, 15]
+        last_exc: Exception = RuntimeError("Login failed")
+        for attempt, delay in enumerate([0] + delays):
+            if delay:
+                time.sleep(delay)
+            try:
+                mm = MonarchMoney()
+                _run(mm.login(
+                    email,
+                    password,
+                    mfa_secret_key=mfa_secret or None,
+                    save_session=False,
+                    use_saved_session=False,
+                ))
+                self._mm = mm
+                return
+            except Exception as exc:
+                last_exc = exc
+                if not _is_rate_limit(exc):
+                    raise
+        raise last_exc
 
     @property
     def is_logged_in(self) -> bool:
