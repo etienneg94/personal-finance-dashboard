@@ -1,7 +1,9 @@
 """Streamlit dashboard — Fun Money Budget Tracker powered by Monarch Money."""
 
+import json
 from calendar import monthrange
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -49,6 +51,26 @@ _DEFAULT_BUDGET = pd.DataFrame([
 ])
 
 # ---------------------------------------------------------------------------
+# Budget persistence helpers
+# ---------------------------------------------------------------------------
+
+_BUDGET_FILE = Path(__file__).parent / "budget_config.json"
+
+
+def _load_budget() -> pd.DataFrame:
+    if _BUDGET_FILE.exists():
+        try:
+            return pd.DataFrame(json.loads(_BUDGET_FILE.read_text()))
+        except Exception:
+            pass
+    return _DEFAULT_BUDGET.copy()
+
+
+def _save_budget(df: pd.DataFrame) -> None:
+    _BUDGET_FILE.write_text(json.dumps(df.to_dict(orient="records"), indent=2))
+
+
+# ---------------------------------------------------------------------------
 # Session state
 # ---------------------------------------------------------------------------
 
@@ -62,7 +84,7 @@ for _k, _v in [
         st.session_state[_k] = _v
 
 if "budget" not in st.session_state:
-    st.session_state.budget = _DEFAULT_BUDGET.copy()
+    st.session_state.budget = _load_budget()
 
 # ---------------------------------------------------------------------------
 # Header
@@ -279,6 +301,10 @@ budget_df = st.data_editor(
     key="budget_editor",
 )
 st.session_state.budget = budget_df
+
+if st.button("💾 Save Budget", help="Persist your budget so it reloads automatically next time."):
+    _save_budget(budget_df)
+    st.success("Budget saved!")
 
 # ---------------------------------------------------------------------------
 # Compute budget vs actual

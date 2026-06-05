@@ -1,0 +1,12 @@
+# Streamlit secrets — never commit credentials
+.streamlit/secrets.toml
+
+# Saved budget (contains personal financial data)
+budget_config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
