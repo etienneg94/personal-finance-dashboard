@@ -108,14 +108,23 @@ def _try_secrets_login() -> bool:
         email    = st.secrets.get("MONARCH_EMAIL", "")
         password = st.secrets.get("MONARCH_PASSWORD", "")
         mfa      = st.secrets.get("MONARCH_MFA_SECRET", "")
-        if email and password:
-            c = MonarchClient()
-            c.login(email, password, mfa or None)
-            st.session_state.client = c
-            return True
     except Exception:
-        pass
-    return False
+        return False
+
+    if not email or not password:
+        return False
+
+    try:
+        c = MonarchClient()
+        c.login(email, password, mfa or None)
+        st.session_state.client = c
+        return True
+    except Exception as exc:
+        if _is_rate_limit(exc):
+            st.error("**Auto-login rate limited (429).** Please wait 2–5 minutes and reload.")
+        else:
+            st.error(f"**Auto-login failed:** {exc}")
+        st.stop()
 
 
 if st.session_state.client is None:
