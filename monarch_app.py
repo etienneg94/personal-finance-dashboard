@@ -155,7 +155,13 @@ def _try_secrets_login() -> bool:
 
 
 if st.session_state.client is None:
-    if not _try_secrets_login():
+    # 1) Try saved session token
+    _saved = MonarchClient.from_saved_session()
+    if _saved:
+        st.session_state.client = _saved
+    # 2) Try secrets-based auto-login
+    elif not _try_secrets_login():
+        # 3) Fall back to manual form
         st.markdown("### Connect to Monarch Money")
         with st.form("login_form"):
             email_in = st.text_input("Email", placeholder="you@example.com")
@@ -171,7 +177,7 @@ if st.session_state.client is None:
             if not email_in or not pw_in:
                 st.error("Email and password are required.")
             else:
-                with st.spinner("Connecting… (auto-retrying on rate limits)"):
+                with st.spinner("Connecting…"):
                     try:
                         c = MonarchClient()
                         c.login(email_in, pw_in, mfa_in.strip() or None)

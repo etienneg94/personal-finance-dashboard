@@ -4,6 +4,7 @@
 # Saved app data (contains personal financial data)
 budget_config.json
 hidden_txns.json
+monarch_session.json
 
 # Python
 __pycache__/

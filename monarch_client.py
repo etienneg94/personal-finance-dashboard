@@ -1,8 +1,12 @@
 """Monarch Money synchronous client — wraps the async monarchmoney library."""
 
 import asyncio
+import json
 import time
+from pathlib import Path
 from typing import Optional
+
+_SESSION_FILE = Path(__file__).parent / "monarch_session.json"
 
 
 def _run(coro):
@@ -25,55 +29,79 @@ class MonarchClient:
         self._mm = None
 
     def login(self, email: str, password: str, mfa_secret: Optional[str] = None) -> None:
-        token = _run(self._login_async(email, password, mfa_secret))
+        token = self._login_sync(email, password, mfa_secret)
+        self._set_token(token)
+        self.save_session()
+
+    def _set_token(self, token: str) -> None:
         from monarchmoney import MonarchMoney
         mm = MonarchMoney()
         mm.set_token(token)
         mm._headers["Authorization"] = f"Token {token}"
         self._mm = mm
 
-    @staticmethod
-    async def _login_async(email: str, password: str, mfa_secret: Optional[str]) -> str:
-        """Single-session two-step login that preserves Cloudflare cookies."""
-        import aiohttp
-        import oathtool
+    def save_session(self) -> None:
+        if self._mm and self._mm._token:
+            _SESSION_FILE.write_text(json.dumps({"token": self._mm._token}))
 
+    def clear_session(self) -> None:
+        if _SESSION_FILE.exists():
+            _SESSION_FILE.unlink()
+
+    @classmethod
+    def from_saved_session(cls) -> Optional["MonarchClient"]:
+        """Return a client using the saved token, or None if no valid session exists."""
+        if not _SESSION_FILE.exists():
+            return None
+        try:
+            token = json.loads(_SESSION_FILE.read_text()).get("token", "")
+            if not token:
+                return None
+            c = cls()
+            c._set_token(token)
+            return c
+        except Exception:
+            return None
+
+    @staticmethod
+    def _login_sync(email: str, password: str, mfa_secret: Optional[str]) -> str:
+        """Two-step login using curl_cffi to pass Cloudflare's TLS fingerprint check."""
+        import json as _json
+        import oathtool
+        from curl_cffi import requests as cf_requests
+
+        url = "https://api.monarch.com/auth/login/"
         headers = {
             "Accept": "application/json",
             "Client-Platform": "web",
             "Content-Type": "application/json",
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
+            "Origin": "https://app.monarchmoney.com",
+            "Referer": "https://app.monarchmoney.com/login",
         }
-        url = "https://api.monarch.com/auth/login/"
 
-        async with aiohttp.ClientSession(headers=headers) as session:
-            # Step 1 — email + password only
-            payload = {
-                "username": email,
-                "password": password,
-                "supports_mfa": True,
-                "trusted_device": False,
-            }
-            async with session.post(url, json=payload) as resp:
-                if resp.status == 200:
-                    return (await resp.json())["token"]
-                if resp.status != 403:
-                    text = await resp.text()
-                    raise RuntimeError(f"Login failed ({resp.status}): {text}")
+        session = cf_requests.Session(impersonate="chrome124")
 
-            # Step 2 — same session (Cloudflare cookie preserved), add TOTP
-            if not mfa_secret:
-                raise RuntimeError("Multi-Factor Auth Required but no MFA secret configured.")
-            payload["totp"] = oathtool.generate_otp(mfa_secret.strip())
-            async with session.post(url, json=payload) as resp:
-                if resp.status == 200:
-                    return (await resp.json())["token"]
-                text = await resp.text()
-                raise RuntimeError(f"MFA login failed ({resp.status}): {text}")
+        # Step 1 — email + password only
+        payload = {
+            "username": email,
+            "password": password,
+            "supports_mfa": True,
+            "trusted_device": False,
+        }
+        resp = session.post(url, json=payload, headers=headers)
+        if resp.status_code == 200:
+            return resp.json()["token"]
+        if resp.status_code != 403:
+            raise RuntimeError(f"Login failed ({resp.status_code}): {resp.text}")
+
+        # Step 2 — same session (cookies preserved), add TOTP
+        if not mfa_secret:
+            raise RuntimeError("Multi-Factor Auth Required but no MFA secret is configured.")
+        payload["totp"] = oathtool.generate_otp(mfa_secret.strip())
+        resp = session.post(url, json=payload, headers=headers)
+        if resp.status_code == 200:
+            return resp.json()["token"]
+        raise RuntimeError(f"MFA login failed ({resp.status_code}): {resp.text}")
 
     @property
     def is_logged_in(self) -> bool:
