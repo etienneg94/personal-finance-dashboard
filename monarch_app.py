@@ -143,7 +143,7 @@ def _try_secrets_login() -> bool:
 
     try:
         c = MonarchClient()
-        c.login(email, password, None)
+        c.login(email, password, mfa or None)
         st.session_state.client = c
         return True
     except Exception as exc:
