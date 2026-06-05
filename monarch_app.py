@@ -1,6 +1,7 @@
 """Streamlit dashboard — Fun Money Budget Tracker powered by Monarch Money."""
 
 import json
+import tomllib
 from calendar import monthrange
 from datetime import date
 from pathlib import Path
@@ -103,13 +104,24 @@ def _is_rate_limit(exc: Exception) -> bool:
     return "429" in msg or "Too Many Requests" in msg or "rate limit" in msg.lower()
 
 
-def _try_secrets_login() -> bool:
+def _read_secrets() -> dict:
+    """Read credentials from .streamlit/secrets.toml next to this file."""
+    secrets_file = Path(__file__).parent / ".streamlit" / "secrets.toml"
+    if secrets_file.exists():
+        with open(secrets_file, "rb") as f:
+            return tomllib.load(f)
+    # Fall back to st.secrets (works on Streamlit Cloud)
     try:
-        email    = st.secrets.get("MONARCH_EMAIL", "")
-        password = st.secrets.get("MONARCH_PASSWORD", "")
-        mfa      = st.secrets.get("MONARCH_MFA_SECRET", "")
+        return dict(st.secrets)
     except Exception:
-        return False
+        return {}
+
+
+def _try_secrets_login() -> bool:
+    secrets = _read_secrets()
+    email    = secrets.get("MONARCH_EMAIL", "")
+    password = secrets.get("MONARCH_PASSWORD", "")
+    mfa      = secrets.get("MONARCH_MFA_SECRET", "")
 
     if not email or not password:
         return False
