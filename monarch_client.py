@@ -25,6 +25,7 @@ class MonarchClient:
         self._mm = None
 
     def login(self, email: str, password: str, mfa_secret: Optional[str] = None) -> None:
+        import oathtool
         from monarchmoney import MonarchMoney
         delays = [5, 15]
         last_exc: Exception = RuntimeError("Login failed")
@@ -33,13 +34,21 @@ class MonarchClient:
                 time.sleep(delay)
             try:
                 mm = MonarchMoney()
-                _run(mm.login(
-                    email,
-                    password,
-                    mfa_secret_key=mfa_secret or None,
-                    save_session=False,
-                    use_saved_session=False,
-                ))
+                try:
+                    _run(mm.login(
+                        email,
+                        password,
+                        mfa_secret_key=None,
+                        save_session=False,
+                        use_saved_session=False,
+                    ))
+                except Exception as first_exc:
+                    # MFA required — submit TOTP as a second step
+                    if "Multi-Factor" in str(first_exc) and mfa_secret:
+                        totp = oathtool.generate_otp(mfa_secret.strip())
+                        _run(mm.multi_factor_authenticate(email, password, totp))
+                    else:
+                        raise
                 self._mm = mm
                 return
             except Exception as exc:
