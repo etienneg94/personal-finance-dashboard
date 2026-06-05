@@ -25,37 +25,55 @@ class MonarchClient:
         self._mm = None
 
     def login(self, email: str, password: str, mfa_secret: Optional[str] = None) -> None:
-        import oathtool
+        token = _run(self._login_async(email, password, mfa_secret))
         from monarchmoney import MonarchMoney
-        delays = [5, 15]
-        last_exc: Exception = RuntimeError("Login failed")
-        for attempt, delay in enumerate([0] + delays):
-            if delay:
-                time.sleep(delay)
-            try:
-                mm = MonarchMoney()
-                try:
-                    _run(mm.login(
-                        email,
-                        password,
-                        mfa_secret_key=None,
-                        save_session=False,
-                        use_saved_session=False,
-                    ))
-                except Exception as first_exc:
-                    # MFA required — submit TOTP as a second step
-                    if "Multi-Factor" in str(first_exc) and mfa_secret:
-                        totp = oathtool.generate_otp(mfa_secret.strip())
-                        _run(mm.multi_factor_authenticate(email, password, totp))
-                    else:
-                        raise
-                self._mm = mm
-                return
-            except Exception as exc:
-                last_exc = exc
-                if not _is_rate_limit(exc):
-                    raise
-        raise last_exc
+        mm = MonarchMoney()
+        mm.set_token(token)
+        mm._headers["Authorization"] = f"Token {token}"
+        self._mm = mm
+
+    @staticmethod
+    async def _login_async(email: str, password: str, mfa_secret: Optional[str]) -> str:
+        """Single-session two-step login that preserves Cloudflare cookies."""
+        import aiohttp
+        import oathtool
+
+        headers = {
+            "Accept": "application/json",
+            "Client-Platform": "web",
+            "Content-Type": "application/json",
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+        }
+        url = "https://api.monarch.com/auth/login/"
+
+        async with aiohttp.ClientSession(headers=headers) as session:
+            # Step 1 — email + password only
+            payload = {
+                "username": email,
+                "password": password,
+                "supports_mfa": True,
+                "trusted_device": False,
+            }
+            async with session.post(url, json=payload) as resp:
+                if resp.status == 200:
+                    return (await resp.json())["token"]
+                if resp.status != 403:
+                    text = await resp.text()
+                    raise RuntimeError(f"Login failed ({resp.status}): {text}")
+
+            # Step 2 — same session (Cloudflare cookie preserved), add TOTP
+            if not mfa_secret:
+                raise RuntimeError("Multi-Factor Auth Required but no MFA secret configured.")
+            payload["totp"] = oathtool.generate_otp(mfa_secret.strip())
+            async with session.post(url, json=payload) as resp:
+                if resp.status == 200:
+                    return (await resp.json())["token"]
+                text = await resp.text()
+                raise RuntimeError(f"MFA login failed ({resp.status}): {text}")
 
     @property
     def is_logged_in(self) -> bool:
