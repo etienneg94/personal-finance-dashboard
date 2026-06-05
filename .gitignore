@@ -1,8 +1,9 @@
 # Streamlit secrets — never commit credentials
 .streamlit/secrets.toml
 
-# Saved budget (contains personal financial data)
+# Saved app data (contains personal financial data)
 budget_config.json
+hidden_txns.json
 
 # Python
 __pycache__/

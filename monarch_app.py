@@ -52,10 +52,11 @@ _DEFAULT_BUDGET = pd.DataFrame([
 ])
 
 # ---------------------------------------------------------------------------
-# Budget persistence helpers
+# Persistence helpers
 # ---------------------------------------------------------------------------
 
-_BUDGET_FILE = Path(__file__).parent / "budget_config.json"
+_BUDGET_FILE     = Path(__file__).parent / "budget_config.json"
+_HIDDEN_TXN_FILE = Path(__file__).parent / "hidden_txns.json"
 
 
 def _load_budget() -> pd.DataFrame:
@@ -69,6 +70,19 @@ def _load_budget() -> pd.DataFrame:
 
 def _save_budget(df: pd.DataFrame) -> None:
     _BUDGET_FILE.write_text(json.dumps(df.to_dict(orient="records"), indent=2))
+
+
+def _load_hidden_txns() -> set:
+    if _HIDDEN_TXN_FILE.exists():
+        try:
+            return set(json.loads(_HIDDEN_TXN_FILE.read_text()))
+        except Exception:
+            pass
+    return set()
+
+
+def _save_hidden_txns(ids: set) -> None:
+    _HIDDEN_TXN_FILE.write_text(json.dumps(sorted(ids)))
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +100,9 @@ for _k, _v in [
 
 if "budget" not in st.session_state:
     st.session_state.budget = _load_budget()
+
+if "hidden_txn_ids" not in st.session_state:
+    st.session_state.hidden_txn_ids = _load_hidden_txns()
 
 # ---------------------------------------------------------------------------
 # Header
@@ -105,12 +122,10 @@ def _is_rate_limit(exc: Exception) -> bool:
 
 
 def _read_secrets() -> dict:
-    """Read credentials from .streamlit/secrets.toml next to this file."""
     secrets_file = Path(__file__).parent / ".streamlit" / "secrets.toml"
     if secrets_file.exists():
         with open(secrets_file, "rb") as f:
             return tomllib.load(f)
-    # Fall back to st.secrets (works on Streamlit Cloud)
     try:
         return dict(st.secrets)
     except Exception:
@@ -118,7 +133,7 @@ def _read_secrets() -> dict:
 
 
 def _try_secrets_login() -> bool:
-    secrets = _read_secrets()
+    secrets  = _read_secrets()
     email    = secrets.get("MONARCH_EMAIL", "")
     password = secrets.get("MONARCH_PASSWORD", "")
     mfa      = secrets.get("MONARCH_MFA_SECRET", "")
@@ -232,10 +247,11 @@ txns_raw: list[dict] = st.session_state.txn_cache or []
 
 def _parse(raw: list[dict]) -> pd.DataFrame:
     rows = []
-    for t in raw:
+    for i, t in enumerate(raw):
         cat      = t.get("category") or {}
         merchant = t.get("merchant") or {}
         rows.append({
+            "id":         str(t.get("id") or i),
             "date":       t.get("date", ""),
             "merchant":   merchant.get("name") or t.get("description", ""),
             "category":   cat.get("name", "Uncategorized"),
@@ -245,25 +261,31 @@ def _parse(raw: list[dict]) -> pd.DataFrame:
             "notes":      t.get("notes", "") or "",
         })
     df = pd.DataFrame(rows) if rows else pd.DataFrame(
-        columns=["date", "merchant", "category", "amount", "is_income", "is_pending", "notes"]
+        columns=["id", "date", "merchant", "category", "amount", "is_income", "is_pending", "notes"]
     )
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"])
     return df
 
 
-txns_df    = _parse(txns_raw)
-income_df  = txns_df[ txns_df["is_income"]  & ~txns_df["is_pending"]]
-expense_df = txns_df[~txns_df["is_income"]  & ~txns_df["is_pending"]]
+txns_df = _parse(txns_raw)
+hidden  = st.session_state.hidden_txn_ids
+
+income_df  = txns_df[ txns_df["is_income"] & ~txns_df["is_pending"] & ~txns_df["id"].isin(hidden)]
+expense_df = txns_df[~txns_df["is_income"] & ~txns_df["is_pending"] & ~txns_df["id"].isin(hidden)]
 
 monarch_income = income_df["amount"].sum()
 monarch_cats   = sorted(expense_df["category"].dropna().unique().tolist()) if not expense_df.empty else []
 cat_spending   = expense_df.groupby("category")["amount"].sum().to_dict() if not expense_df.empty else {}
 
+# Reserve a spot at the top for the summary — filled in after computations below
+summary_placeholder = st.container()
+
 # ---------------------------------------------------------------------------
 # Income
 # ---------------------------------------------------------------------------
 
+st.divider()
 st.markdown("### 💰 Monthly Income")
 
 if monarch_income > 0:
@@ -355,109 +377,101 @@ bk = pd.DataFrame(breakdown_rows) if breakdown_rows else pd.DataFrame(
 
 total_budgeted      = float(bk["Budget ($)"].sum())
 essential_tracked   = float(bk.loc[bk["_tracked"],  "Actual ($)"].sum())
-# Rows with no Monarch link: assume the full budgeted amount was spent (outside Monarch's view)
 essential_untracked = float(bk.loc[~bk["_tracked"] & (bk["Budget ($)"] > 0), "Budget ($)"].sum())
-
-# Everything else in Monarch not mapped to a budget row
-other_spending = sum(v for c, v in cat_spending.items() if c not in matched_cats)
+other_spending      = sum(v for c, v in cat_spending.items() if c not in matched_cats)
 
 fun_money_budget    = total_income - total_budgeted
 fun_money_remaining = total_income - essential_tracked - essential_untracked - other_spending
 
-st.divider()
-
 # ---------------------------------------------------------------------------
-# Summary metrics
+# Summary — rendered into the placeholder reserved at the top
 # ---------------------------------------------------------------------------
 
-st.markdown(f"### 📊 {selected_label} Summary")
+with summary_placeholder:
+    st.markdown(f"### 📊 {selected_label} Summary")
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Income",           f"${total_income:,.2f}")
-m2.metric("Essential Budget", f"${total_budgeted:,.2f}",
-          delta=f"${essential_tracked:,.2f} tracked · ${essential_untracked:,.2f} assumed",
-          delta_color="off")
-m3.metric("Fun Money Budget", f"${fun_money_budget:,.2f}",
-          help="Income minus your total essential budget")
-m4.metric("🎉 Fun Money Left",
-          f"${fun_money_remaining:,.2f}",
-          delta="✅ on track" if fun_money_remaining >= 0 else "⚠️ overspent",
-          delta_color="normal" if fun_money_remaining >= 0 else "inverse")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Income",           f"${total_income:,.2f}")
+    m2.metric("Essential Budget", f"${total_budgeted:,.2f}",
+              delta=f"${essential_tracked:,.2f} tracked · ${essential_untracked:,.2f} assumed",
+              delta_color="off")
+    m3.metric("Fun Money Budget", f"${fun_money_budget:,.2f}",
+              help="Income minus your total essential budget")
+    m4.metric("🎉 Fun Money Left",
+              f"${fun_money_remaining:,.2f}",
+              delta="✅ on track" if fun_money_remaining >= 0 else "⚠️ overspent",
+              delta_color="normal" if fun_money_remaining >= 0 else "inverse")
 
-st.write("")
+    st.write("")
 
-# ---------------------------------------------------------------------------
-# Fun money gauge + formula
-# ---------------------------------------------------------------------------
+    if total_income > 0 and fun_money_budget > 0:
+        gauge_col, formula_col = st.columns([1, 1])
 
-if total_income > 0 and fun_money_budget > 0:
-    gauge_col, formula_col = st.columns([1, 1])
+        with gauge_col:
+            safe_val  = max(fun_money_remaining, 0)
+            axis_max  = max(fun_money_budget * 1.05, safe_val, 1)
+            pct_used  = ((fun_money_budget - fun_money_remaining) / fun_money_budget * 100
+                         if fun_money_budget > 0 else 0)
+            bar_color = "#43A047" if pct_used < 60 else ("#FB8C00" if pct_used < 90 else "#E53935")
 
-    with gauge_col:
-        safe_val  = max(fun_money_remaining, 0)
-        axis_max  = max(fun_money_budget * 1.05, safe_val, 1)
-        pct_used  = ((fun_money_budget - fun_money_remaining) / fun_money_budget * 100
-                     if fun_money_budget > 0 else 0)
-        bar_color = "#43A047" if pct_used < 60 else ("#FB8C00" if pct_used < 90 else "#E53935")
-
-        fig = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=safe_val,
-            title={"text": "<b>Fun Money Remaining</b>", "font": {"size": 16}},
-            number={"prefix": "$", "font": {"size": 44, "color": bar_color}},
-            gauge={
-                "axis":  {"range": [0, axis_max], "tickprefix": "$", "nticks": 5},
-                "bar":   {"color": bar_color, "thickness": 0.25},
-                "steps": [
-                    {"range": [0,                    fun_money_budget * 0.35], "color": "#FFEBEE"},
-                    {"range": [fun_money_budget*0.35, fun_money_budget * 0.65], "color": "#FFF9C4"},
-                    {"range": [fun_money_budget*0.65, axis_max],               "color": "#E8F5E9"},
-                ],
-                "threshold": {
-                    "line": {"color": "#388E3C", "width": 3},
-                    "thickness": 0.85,
-                    "value": fun_money_budget,
+            fig = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=safe_val,
+                title={"text": "<b>Fun Money Remaining</b>", "font": {"size": 16}},
+                number={"prefix": "$", "font": {"size": 44, "color": bar_color}},
+                gauge={
+                    "axis":  {"range": [0, axis_max], "tickprefix": "$", "nticks": 5},
+                    "bar":   {"color": bar_color, "thickness": 0.25},
+                    "steps": [
+                        {"range": [0,                    fun_money_budget * 0.35], "color": "#FFEBEE"},
+                        {"range": [fun_money_budget*0.35, fun_money_budget * 0.65], "color": "#FFF9C4"},
+                        {"range": [fun_money_budget*0.65, axis_max],               "color": "#E8F5E9"},
+                    ],
+                    "threshold": {
+                        "line": {"color": "#388E3C", "width": 3},
+                        "thickness": 0.85,
+                        "value": fun_money_budget,
+                    },
                 },
-            },
-        ))
-        fig.update_layout(
-            height=270, margin=dict(t=70, b=10, l=30, r=30),
-            paper_bgcolor="rgba(0,0,0,0)",
-        )
-        st.plotly_chart(fig, use_container_width=True)
+            ))
+            fig.update_layout(
+                height=270, margin=dict(t=70, b=10, l=30, r=30),
+                paper_bgcolor="rgba(0,0,0,0)",
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
-    with formula_col:
-        st.markdown("**How it's calculated**")
-        formula_df = pd.DataFrame({
-            "Item": [
-                "Income",
-                "− Essential (Monarch-tracked)",
-                "− Essential (not in Monarch)",
-                "− Other spending",
-                "= Fun money left",
-            ],
-            "Amount": [
-                f"${total_income:,.2f}",
-                f"− ${essential_tracked:,.2f}",
-                f"− ${essential_untracked:,.2f}",
-                f"− ${other_spending:,.2f}",
-                f"${fun_money_remaining:,.2f}",
-            ],
-        })
-        st.dataframe(
-            formula_df, hide_index=True, use_container_width=True,
-            column_config={
-                "Item":   st.column_config.TextColumn(width=270),
-                "Amount": st.column_config.TextColumn(width=130),
-            },
-        )
-        st.caption(
-            '"Not in Monarch" rows use the budgeted amount as a proxy '
-            'since no transactions are tracked for them.'
-        )
+        with formula_col:
+            st.markdown("**How it's calculated**")
+            formula_df = pd.DataFrame({
+                "Item": [
+                    "Income",
+                    "− Essential (Monarch-tracked)",
+                    "− Essential (not in Monarch)",
+                    "− Other spending",
+                    "= Fun money left",
+                ],
+                "Amount": [
+                    f"${total_income:,.2f}",
+                    f"− ${essential_tracked:,.2f}",
+                    f"− ${essential_untracked:,.2f}",
+                    f"− ${other_spending:,.2f}",
+                    f"${fun_money_remaining:,.2f}",
+                ],
+            })
+            st.dataframe(
+                formula_df, hide_index=True, use_container_width=True,
+                column_config={
+                    "Item":   st.column_config.TextColumn(width=270),
+                    "Amount": st.column_config.TextColumn(width=130),
+                },
+            )
+            st.caption(
+                '"Not in Monarch" rows use the budgeted amount as a proxy '
+                'since no transactions are tracked for them.'
+            )
 
-elif total_income == 0:
-    st.info("Enter your monthly income above to see the fun money gauge.")
+    elif total_income == 0:
+        st.info("Enter your monthly income below to see the fun money gauge.")
 
 st.divider()
 
@@ -488,7 +502,7 @@ else:
 st.divider()
 
 # ---------------------------------------------------------------------------
-# Other spending (unbudgeted Monarch categories → fun money)
+# Other spending (unbudgeted Monarch categories)
 # ---------------------------------------------------------------------------
 
 st.markdown("### 🎯 Other Spending")
@@ -522,34 +536,77 @@ else:
 st.divider()
 
 # ---------------------------------------------------------------------------
-# All transactions (expandable)
+# Transactions — with exclude toggles
 # ---------------------------------------------------------------------------
 
-with st.expander(f"📄 All transactions — {selected_label}", expanded=False):
-    if expense_df.empty:
+def _txn_editor(df: pd.DataFrame, key: str) -> set:
+    """Render an editable transaction table with an Exclude column.
+    Returns the set of IDs the user has checked as excluded."""
+    if df.empty:
+        return set()
+
+    show = df[["id", "date", "merchant", "category", "amount", "notes"]].copy()
+    show["date"] = show["date"].dt.date
+    show.insert(0, "Exclude", show["id"].isin(st.session_state.hidden_txn_ids))
+
+    edited = st.data_editor(
+        show,
+        use_container_width=True,
+        hide_index=True,
+        key=key,
+        column_config={
+            "Exclude":  st.column_config.CheckboxColumn("Exclude", width=70,
+                            help="Check to remove this transaction from all totals."),
+            "id":       None,  # hide the id column
+            "date":     st.column_config.DateColumn("Date",     width=110),
+            "merchant": st.column_config.TextColumn("Merchant", width=210),
+            "category": st.column_config.TextColumn("Category", width=170),
+            "amount":   st.column_config.NumberColumn("Amount", format="$%.2f", width=110),
+            "notes":    st.column_config.TextColumn("Notes",    width=190),
+        },
+        disabled=["id", "date", "merchant", "category", "amount", "notes"],
+    )
+    return set(edited.loc[edited["Exclude"], "id"].tolist())
+
+
+hidden_after_edit: set = set()
+
+with st.expander(f"📄 Expense transactions — {selected_label}", expanded=False):
+    all_expense = txns_df[~txns_df["is_income"] & ~txns_df["is_pending"]].sort_values("date", ascending=False)
+    if all_expense.empty:
         st.info("No expense transactions found for this month.")
     else:
-        show = (
-            expense_df[["date", "merchant", "category", "amount", "notes"]]
-            .sort_values("date", ascending=False)
-            .copy()
+        n_hidden = int(all_expense["id"].isin(hidden).sum())
+        if n_hidden:
+            st.caption(f"{n_hidden} transaction(s) currently excluded from totals.")
+        hidden_after_edit |= _txn_editor(all_expense, "expense_editor")
+
+        csv = (
+            all_expense[["date", "merchant", "category", "amount", "notes"]]
+            .assign(date=lambda d: d["date"].dt.date)
+            .to_csv(index=False).encode()
         )
-        show["date"] = show["date"].dt.date
-        st.dataframe(
-            show, use_container_width=True, hide_index=True,
-            column_config={
-                "date":     st.column_config.DateColumn("Date",     width=120),
-                "merchant": st.column_config.TextColumn("Merchant", width=220),
-                "category": st.column_config.TextColumn("Category", width=180),
-                "amount":   st.column_config.NumberColumn("Amount", format="$%.2f", width=110),
-                "notes":    st.column_config.TextColumn("Notes",    width=200),
-            },
-        )
-        csv = show.to_csv(index=False).encode()
         st.download_button(
             "⬇️ Download CSV", csv,
-            file_name=f"transactions_{start_str[:7]}.csv",
+            file_name=f"expenses_{start_str[:7]}.csv",
             mime="text/csv",
         )
+
+with st.expander(f"💵 Income transactions — {selected_label}", expanded=False):
+    all_income = txns_df[txns_df["is_income"] & ~txns_df["is_pending"]].sort_values("date", ascending=False)
+    if all_income.empty:
+        st.info("No income transactions found for this month.")
+    else:
+        n_hidden_inc = int(all_income["id"].isin(hidden).sum())
+        if n_hidden_inc:
+            st.caption(f"{n_hidden_inc} transaction(s) currently excluded from totals.")
+        hidden_after_edit |= _txn_editor(all_income, "income_editor")
+
+# Persist exclusion changes
+new_hidden = hidden_after_edit | (hidden - set(txns_df["id"].tolist()))
+if new_hidden != hidden:
+    st.session_state.hidden_txn_ids = new_hidden
+    _save_hidden_txns(new_hidden)
+    st.rerun()
 
 st.caption(f"Monarch Money · {selected_label} · press 🔄 to refresh")
